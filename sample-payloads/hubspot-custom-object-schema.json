@@ -1,0 +1,401 @@
+{
+  "_comment": "SYNTHETIC example. POST to https://api.hubapi.com/crm/v3/schemas once (needs crm.schemas.custom.write). HubSpot will assign the fully qualified name p<portalId>_competitor_pricing (placeholder portal 99000001 → p99000001_competitor_pricing). Remove this _comment key before sending.",
+  "name": "competitor_pricing",
+  "description": "Weekly competitor pricing-page snapshots and structural diffs logged by the n8n diff tracker.",
+  "labels": {
+    "singular": "Competitor Pricing Snapshot",
+    "plural": "Competitor Pricing Snapshots"
+  },
+  "primaryDisplayProperty": "snapshot_key",
+  "secondaryDisplayProperties": [
+    "competitor_name",
+    "change_severity"
+  ],
+  "searchableProperties": [
+    "snapshot_key",
+    "competitor_key",
+    "competitor_name"
+  ],
+  "requiredProperties": [
+    "snapshot_key"
+  ],
+  "associatedObjects": [],
+  "properties": [
+    {
+      "name": "snapshot_key",
+      "label": "Snapshot Key",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information",
+      "hasUniqueValue": true,
+      "description": "<competitor_key>__<ISO week>, e.g. competitor-alpha__2026-W47. Upsert id."
+    },
+    {
+      "name": "competitor_key",
+      "label": "Competitor Key",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information",
+      "description": "Lowercase slug identifying the competitor."
+    },
+    {
+      "name": "competitor_name",
+      "label": "Competitor Name",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "competitor_record_id",
+      "label": "Competitor Record ID",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information",
+      "description": "Optional ID of a parent competitor record (e.g. comp_001)."
+    },
+    {
+      "name": "snapshot_date",
+      "label": "Snapshot Date",
+      "type": "date",
+      "fieldType": "date",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "snapshot_status",
+      "label": "Snapshot Status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "groupName": "competitor_pricing_information",
+      "description": "Outcome of the weekly diff.",
+      "options": [
+        {
+          "label": "Changed",
+          "value": "changed",
+          "displayOrder": 0
+        },
+        {
+          "label": "No change",
+          "value": "no_change",
+          "displayOrder": 1
+        },
+        {
+          "label": "Baseline",
+          "value": "baseline",
+          "displayOrder": 2
+        },
+        {
+          "label": "Review required",
+          "value": "review_required",
+          "displayOrder": 3
+        }
+      ]
+    },
+    {
+      "name": "snapshot_valid",
+      "label": "Snapshot Valid",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "groupName": "competitor_pricing_information",
+      "description": "Only valid snapshots are used as the next baseline. Set to Yes after reviewing a flagged scrape.",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1
+        }
+      ]
+    },
+    {
+      "name": "source_url",
+      "label": "Source URL",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "data_source",
+      "label": "Data Source",
+      "type": "enumeration",
+      "fieldType": "select",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "Sandbox",
+          "value": "sandbox",
+          "displayOrder": 0
+        },
+        {
+          "label": "Live",
+          "value": "live",
+          "displayOrder": 1
+        }
+      ]
+    },
+    {
+      "name": "pricing_model",
+      "label": "Pricing Model",
+      "type": "enumeration",
+      "fieldType": "select",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "Per seat",
+          "value": "per_seat",
+          "displayOrder": 0
+        },
+        {
+          "label": "Flat rate",
+          "value": "flat_rate",
+          "displayOrder": 1
+        },
+        {
+          "label": "Usage based",
+          "value": "usage_based",
+          "displayOrder": 2
+        },
+        {
+          "label": "Tiered",
+          "value": "tiered",
+          "displayOrder": 3
+        },
+        {
+          "label": "Hybrid",
+          "value": "hybrid",
+          "displayOrder": 4
+        },
+        {
+          "label": "Unknown",
+          "value": "unknown",
+          "displayOrder": 5
+        }
+      ]
+    },
+    {
+      "name": "currency",
+      "label": "Currency",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "tier_count",
+      "label": "Tier Count",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "lowest_paid_monthly_price",
+      "label": "Lowest Paid Monthly Price",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "highest_listed_monthly_price",
+      "label": "Highest Listed Monthly Price",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "change_severity",
+      "label": "Change Severity",
+      "type": "enumeration",
+      "fieldType": "select",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "None",
+          "value": "none",
+          "displayOrder": 0
+        },
+        {
+          "label": "Low",
+          "value": "low",
+          "displayOrder": 1
+        },
+        {
+          "label": "Medium",
+          "value": "medium",
+          "displayOrder": 2
+        },
+        {
+          "label": "High",
+          "value": "high",
+          "displayOrder": 3
+        },
+        {
+          "label": "Critical",
+          "value": "critical",
+          "displayOrder": 4
+        }
+      ]
+    },
+    {
+      "name": "change_count",
+      "label": "Change Count",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "material_change_count",
+      "label": "Material Change Count",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information",
+      "description": "Changes at high or critical severity."
+    },
+    {
+      "name": "max_price_change_pct",
+      "label": "Max Price Change %",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information",
+      "description": "Largest signed price move this week."
+    },
+    {
+      "name": "price_increase_count",
+      "label": "Price Increase Count",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "price_decrease_count",
+      "label": "Price Decrease Count",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "tiers_added_count",
+      "label": "Tiers Added",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "tiers_removed_count",
+      "label": "Tiers Removed",
+      "type": "number",
+      "fieldType": "number",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "pricing_model_shift",
+      "label": "Pricing Model Shift",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1
+        }
+      ]
+    },
+    {
+      "name": "requires_review",
+      "label": "Requires Review",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1
+        }
+      ]
+    },
+    {
+      "name": "review_reasons",
+      "label": "Review Reasons",
+      "type": "string",
+      "fieldType": "textarea",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "diff_summary",
+      "label": "Diff Summary",
+      "type": "string",
+      "fieldType": "textarea",
+      "groupName": "competitor_pricing_information",
+      "description": "Human-readable list of changes, most severe first."
+    },
+    {
+      "name": "diff_json",
+      "label": "Diff JSON",
+      "type": "string",
+      "fieldType": "textarea",
+      "groupName": "competitor_pricing_information",
+      "description": "Machine-readable change list (≤ 60,000 chars)."
+    },
+    {
+      "name": "diff_truncated",
+      "label": "Diff Truncated",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "groupName": "competitor_pricing_information",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1
+        }
+      ]
+    },
+    {
+      "name": "snapshot_json",
+      "label": "Snapshot JSON",
+      "type": "string",
+      "fieldType": "textarea",
+      "groupName": "competitor_pricing_information",
+      "description": "Normalised snapshot used as next week's baseline."
+    },
+    {
+      "name": "snapshot_fingerprint",
+      "label": "Snapshot Fingerprint",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "previous_snapshot_key",
+      "label": "Previous Snapshot Key",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    },
+    {
+      "name": "run_id",
+      "label": "Run ID",
+      "type": "string",
+      "fieldType": "text",
+      "groupName": "competitor_pricing_information"
+    }
+  ]
+}
