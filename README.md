@@ -53,6 +53,8 @@ n8n-apify-hubspot-competitor-pricing-page-diff-tracker/
 
 ## Architecture overview
 
+![Workflow Overview](./workflow-overview.png)
+
 ```mermaid
 flowchart LR
     subgraph Triggers
