@@ -1,0 +1,862 @@
+{
+  "name": "Competitor Pricing Page Diff Tracker (Apify → HubSpot)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Competitor Pricing Page Diff Tracker\n**Safe by default.** With no env vars set this workflow runs on SYNTHETIC fixtures, writes nothing to HubSpot and sends nothing to Slack.\n\nLive writes need ALL of: `SANDBOX_MODE=false`, `DRY_RUN=false`, `HUBSPOT_LOGGING_ENABLED=true`, `HUBSPOT_ACCESS_TOKEN`, `APIFY_API_TOKEN`, `COMPETITOR_TARGETS_JSON`.\n\nSlack needs `SEND_SLACK_ALERTS=true` + `DRY_RUN=false` + `SLACK_PRICING_ALERT_WEBHOOK_URL`.\n\nSee README.md · DISCLAIMER.md",
+        "height": 300,
+        "width": 460,
+        "color": 4
+      },
+      "id": "3b5c2abe-5d67-484c-a131-78b670b64336",
+      "name": "Safety Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "7006ac6a-22ef-4ae9-a074-47b3e06d5d2f",
+      "name": "Weekly Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Every Monday 06:00 UTC (workflow timezone = UTC)",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "a065640f-9b24-49c3-a12f-972b711750cf",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Config & Safety Gate\n// Reads every runtime setting from environment variables and derives the\n// hard safety gates used by every downstream IF node.\n// SAFE-BY-DEFAULT: a missing, blank or unrecognised flag resolves to its safe\n// value, so a fresh import performs zero external mutations.\n// Secrets are NEVER copied into the item: only boolean \"is present\" checks.\n// ─────────────────────────────────────────────────────────────────────────────\nlet envAccessible = true;\ntry { void $env.SANDBOX_MODE; } catch (e) { envAccessible = false; }\n\nconst readEnv = (key) => {\n  if (!envAccessible) return undefined;\n  try {\n    const v = $env[key];\n    return v === undefined || v === null ? undefined : String(v).trim();\n  } catch (e) {\n    return undefined;\n  }\n};\n\nconst warnings = [];\nif (!envAccessible) {\n  warnings.push('Environment access is blocked (N8N_BLOCK_ENV_ACCESS_IN_NODE=true). All safe defaults were applied.');\n}\n\nconst flag = (key, safeDefault) => {\n  const raw = readEnv(key);\n  if (raw === undefined || raw === '') return safeDefault;\n  const v = raw.toLowerCase();\n  if (['true', '1', 'yes', 'on'].includes(v)) return true;\n  if (['false', '0', 'no', 'off'].includes(v)) return false;\n  warnings.push(`${key} has an unrecognised value; using safe default (${safeDefault}).`);\n  return safeDefault;\n};\n\nconst num = (key, def, min, max) => {\n  const raw = readEnv(key);\n  if (raw === undefined || raw === '') return def;\n  const n = Number(raw);\n  if (!Number.isFinite(n) || n < min || n > max) {\n    warnings.push(`${key} must be a number between ${min} and ${max}; using default ${def}.`);\n    return def;\n  }\n  return n;\n};\n\nconst oneOf = (key, def, allowed) => {\n  const raw = (readEnv(key) || '').toLowerCase();\n  if (!raw) return def;\n  if (allowed.includes(raw)) return raw;\n  warnings.push(`${key} must be one of ${allowed.join(', ')}; using default ${def}.`);\n  return def;\n};\n\nconst parseJsonEnv = (key, fallback) => {\n  const raw = readEnv(key);\n  if (!raw) return fallback;\n  try { return JSON.parse(raw); } catch (e) {\n    warnings.push(`${key} is not valid JSON; ignored.`);\n    return fallback;\n  }\n};\n\n// ── Run clock (RUN_TIMESTAMP_OVERRIDE allows reproducible backfills/simulations)\nlet runDate = new Date();\nconst tsOverride = readEnv('RUN_TIMESTAMP_OVERRIDE');\nif (tsOverride) {\n  const d = new Date(tsOverride);\n  if (Number.isNaN(d.getTime())) warnings.push('RUN_TIMESTAMP_OVERRIDE is not a valid ISO date; using current time.');\n  else runDate = d;\n}\nconst isoWeek = (d) => {\n  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));\n  const day = date.getUTCDay() || 7;\n  date.setUTCDate(date.getUTCDate() + 4 - day);\n  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));\n  const week = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);\n  return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;\n};\n\n// ── Safety flags (safe defaults)\nconst sandboxRequested = flag('SANDBOX_MODE', true);\nconst dryRun = flag('DRY_RUN', true);\nconst hubspotLoggingEnabled = flag('HUBSPOT_LOGGING_ENABLED', false);\nconst sendSlackAlerts = flag('SEND_SLACK_ALERTS', false);\nconst sendOpsAlerts = flag('SEND_OPS_ALERTS', false);\n\n// ── Secret presence (values are never read into the item)\nconst hasHubspotToken = Boolean(readEnv('HUBSPOT_ACCESS_TOKEN'));\nconst hasApifyToken = Boolean(readEnv('APIFY_API_TOKEN'));\nconst hasSlackWebhook = /^https:\\/\\//i.test(readEnv('SLACK_PRICING_ALERT_WEBHOOK_URL') || '');\nconst hasAlertWebhook = /^https:\\/\\//i.test(readEnv('ALERT_WEBHOOK_URL') || '');\n\n// ── Competitor targets (live mode only)\nconst rawTargets = parseJsonEnv('COMPETITOR_TARGETS_JSON', []);\nconst competitorTargets = [];\nif (!Array.isArray(rawTargets)) {\n  warnings.push('COMPETITOR_TARGETS_JSON must be a JSON array; ignored.');\n} else {\n  const seen = new Set();\n  rawTargets.forEach((t, i) => {\n    const key = String(t?.competitorKey || '').trim().toLowerCase();\n    const url = String(t?.pricingUrl || '').trim();\n    if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(key)) { warnings.push(`Target #${i + 1} skipped: competitorKey must be a lowercase slug.`); return; }\n    if (!/^https:\\/\\/[^\\s]+$/i.test(url)) { warnings.push(`Target \"${key}\" skipped: pricingUrl must be an https:// URL.`); return; }\n    if (seen.has(key)) { warnings.push(`Target \"${key}\" skipped: duplicate competitorKey.`); return; }\n    seen.add(key);\n    competitorTargets.push({\n      competitorKey: key,\n      competitorName: String(t.competitorName || key).slice(0, 120),\n      pricingUrl: url,\n      hubspotRecordId: t.hubspotRecordId ? String(t.hubspotRecordId) : null,\n    });\n  });\n}\n\nconst apifyInputDefaults = parseJsonEnv('APIFY_ACTOR_INPUT_JSON', {});\n\n// ── Derived hard gates\nconst liveFetchReady = hasApifyToken && hasHubspotToken && competitorTargets.length > 0;\nlet sandboxMode = sandboxRequested;\nif (!sandboxRequested && !liveFetchReady) {\n  sandboxMode = true;\n  const missing = [\n    !hasApifyToken && 'APIFY_API_TOKEN',\n    !hasHubspotToken && 'HUBSPOT_ACCESS_TOKEN',\n    competitorTargets.length === 0 && 'COMPETITOR_TARGETS_JSON',\n  ].filter(Boolean).join(', ');\n  warnings.push(`SANDBOX_MODE=false but live prerequisites are missing (${missing}). Forced back to sandbox fixtures.`);\n}\n\nconst allowHubspotWrite = !sandboxMode && !dryRun && hubspotLoggingEnabled && hasHubspotToken;\nconst allowSlackSend = sendSlackAlerts && !dryRun && hasSlackWebhook;\nconst allowOpsAlert = sendOpsAlerts && !dryRun && hasAlertWebhook;\n\nlet writeBlockedReason = null;\nif (!allowHubspotWrite) {\n  writeBlockedReason = sandboxMode ? 'sandbox_mode'\n    : dryRun ? 'dry_run'\n    : !hubspotLoggingEnabled ? 'hubspot_logging_disabled'\n    : 'missing_hubspot_token';\n}\n\nconst modeLabel = sandboxMode ? 'SANDBOX' : (dryRun ? 'LIVE-DRY-RUN' : 'LIVE');\nconst stamp = runDate.toISOString().replace(/[-:]/g, '').replace(/\\..+$/, '').replace('T', '-');\nconst execId = (typeof $execution !== 'undefined' && $execution && $execution.id) ? String($execution.id) : 'manual';\n\nreturn [{\n  json: {\n    runId: `cpdt-${stamp}-${execId}`,\n    runStartedAt: runDate.toISOString(),\n    runDate: runDate.toISOString().slice(0, 10),\n    isoWeek: isoWeek(runDate),\n    modeLabel,\n    envAccessible,\n\n    // Safety flags as requested + effective gates\n    sandboxRequested,\n    sandboxMode,\n    dryRun,\n    hubspotLoggingEnabled,\n    sendSlackAlerts,\n    sendOpsAlerts,\n    allowHubspotWrite,\n    allowSlackSend,\n    allowOpsAlert,\n    writeBlockedReason,\n\n    // Secret presence only (never values)\n    secretsPresent: { hasHubspotToken, hasApifyToken, hasSlackWebhook, hasAlertWebhook },\n\n    // Integration identifiers (non-secret placeholders by default)\n    apifyActorId: readEnv('APIFY_ACTOR_ID') || 'mock-user~pricing-page-scraper',\n    apifyRunTimeoutSecs: num('APIFY_RUN_TIMEOUT_SECS', 240, 30, 290),\n    apifyInputDefaults: (apifyInputDefaults && typeof apifyInputDefaults === 'object' && !Array.isArray(apifyInputDefaults)) ? apifyInputDefaults : {},\n    hubspotPortalId: readEnv('HUBSPOT_PORTAL_ID') || '99000001',\n    hubspotObjectType: readEnv('HUBSPOT_COMPETITOR_OBJECT_TYPE') || 'p99000001_competitor_pricing',\n    hubspotBatchSize: Math.floor(num('HUBSPOT_BATCH_SIZE', 50, 1, 100)),\n\n    // Diff thresholds\n    priceChangeThresholdPct: num('PRICE_CHANGE_THRESHOLD_PCT', 5, 0.1, 100),\n    annualDiscountShiftThresholdPp: num('ANNUAL_DISCOUNT_SHIFT_THRESHOLD_PP', 5, 0.1, 100),\n    suspectTierRemovalRatio: num('SUSPECT_TIER_REMOVAL_RATIO', 0.5, 0.05, 1),\n    alertMinSeverity: oneOf('ALERT_MIN_SEVERITY', 'high', ['low', 'medium', 'high', 'critical']),\n\n    competitorTargets,\n    warnings,\n  },\n}];\n"
+      },
+      "id": "8ba7dfc7-3cc3-45b3-a010-6090a3478c3d",
+      "name": "Config & Safety Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ee29fd2e-34cc-4099-a659-eb824fa1a2dc",
+              "leftValue": "={{ $json.sandboxMode }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d274e720-e34b-44fd-ae75-cb80f80c61f4",
+      "name": "Route: Sandbox or Live?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Load Sandbox Fixture\n// Emits one item per competitor using SYNTHETIC data only. The embedded copy\n// mirrors sample-payloads/competitor-pricing-fixture.json. No network calls.\n// ─────────────────────────────────────────────────────────────────────────────\n/* FIXTURE:START */\nconst FIXTURE = {\n  \"_meta\": {\n    \"description\": \"SYNTHETIC sandbox fixture for n8n-apify-hubspot-competitor-pricing-page-diff-tracker. All competitors, domains, IDs and prices are fictional. Domains use the reserved example.com namespace.\",\n    \"schemaVersion\": \"competitor-pricing-snapshot/v1\",\n    \"hubspotPortalId\": \"99000001\",\n    \"hubspotObjectType\": \"p99000001_competitor_pricing\",\n    \"apifyActorId\": \"mock-user~pricing-page-scraper\",\n    \"scenarios\": {\n      \"competitor-alpha\": \"Per-seat price hike, new contact-sales Enterprise tier, SSO gated up-market, seat limit cut, annual discount narrowed.\",\n      \"beta-metrics\": \"Pricing model shift per_seat → usage_based, Team tier replaced by Growth, Scale moved to contact sales, free trial removed.\",\n      \"gamma-ledger\": \"Structurally identical snapshot (EUR) → no_change fast path.\",\n      \"delta-signal\": \"No previous snapshot → baseline captured.\",\n      \"epsilon-grid\": \"Scrape returned zero tiers → review_required, snapshot marked invalid.\"\n    }\n  },\n  \"competitors\": [\n    {\n      \"competitorKey\": \"competitor-alpha\",\n      \"competitorName\": \"CompetitorAlpha Inc\",\n      \"hubspotRecordId\": \"comp_001\",\n      \"pricingUrl\": \"https://competitor-alpha.example.com/pricing\",\n      \"scrapeMeta\": {\n        \"apifyRunId\": \"mock-run-0001\",\n        \"datasetId\": \"mock-dataset-0001\"\n      },\n      \"previousSnapshot\": {\n        \"capturedAt\": \"2026-11-09T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"per_seat\",\n        \"freeTrialDays\": 14,\n        \"tiers\": [\n          {\n            \"id\": \"starter\",\n            \"name\": \"Starter\",\n            \"monthlyPrice\": 19,\n            \"annualPricePerMonth\": 15,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 10,\n            \"includedSeats\": 1,\n            \"features\": {\n              \"dashboards\": \"5\",\n              \"api_access\": false,\n              \"sso\": false,\n              \"audit_logs\": false,\n              \"email_support\": true\n            }\n          },\n          {\n            \"id\": \"pro\",\n            \"name\": \"Pro\",\n            \"monthlyPrice\": 49,\n            \"annualPricePerMonth\": 39,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 50,\n            \"includedSeats\": 3,\n            \"features\": {\n              \"dashboards\": \"25\",\n              \"api_access\": true,\n              \"sso\": true,\n              \"audit_logs\": false,\n              \"email_support\": true\n            }\n          },\n          {\n            \"id\": \"business\",\n            \"name\": \"Business\",\n            \"monthlyPrice\": 99,\n            \"annualPricePerMonth\": 79,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 250,\n            \"includedSeats\": 5,\n            \"features\": {\n              \"dashboards\": \"unlimited\",\n              \"api_access\": true,\n              \"sso\": true,\n              \"audit_logs\": true,\n              \"email_support\": true\n            }\n          }\n        ]\n      },\n      \"currentSnapshot\": {\n        \"capturedAt\": \"2026-11-16T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"per_seat\",\n        \"freeTrialDays\": 14,\n        \"tiers\": [\n          {\n            \"id\": \"starter\",\n            \"name\": \"Starter\",\n            \"monthlyPrice\": 19,\n            \"annualPricePerMonth\": 16,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 10,\n            \"includedSeats\": 1,\n            \"features\": {\n              \"dashboards\": \"5\",\n              \"api_access\": false,\n              \"sso\": false,\n              \"audit_logs\": false,\n              \"email_support\": true\n            }\n          },\n          {\n            \"id\": \"pro\",\n            \"name\": \"Pro\",\n            \"monthlyPrice\": 56,\n            \"annualPricePerMonth\": 45,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 40,\n            \"includedSeats\": 3,\n            \"features\": {\n              \"dashboards\": \"30\",\n              \"api_access\": true,\n              \"sso\": false,\n              \"audit_logs\": false,\n              \"email_support\": true\n            }\n          },\n          {\n            \"id\": \"business\",\n            \"name\": \"Business\",\n            \"monthlyPrice\": 99,\n            \"annualPricePerMonth\": 81,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 250,\n            \"includedSeats\": 5,\n            \"features\": {\n              \"dashboards\": \"unlimited\",\n              \"api_access\": true,\n              \"sso\": true,\n              \"audit_logs\": true,\n              \"email_support\": true\n            }\n          },\n          {\n            \"id\": \"enterprise\",\n            \"name\": \"Enterprise\",\n            \"monthlyPrice\": \"Contact sales\",\n            \"annualPricePerMonth\": null,\n            \"isContactSales\": true,\n            \"billingUnit\": \"custom\",\n            \"seatLimit\": \"unlimited\",\n            \"includedSeats\": null,\n            \"features\": {\n              \"dashboards\": \"unlimited\",\n              \"api_access\": true,\n              \"sso\": true,\n              \"audit_logs\": true,\n              \"scim_provisioning\": true,\n              \"email_support\": true,\n              \"dedicated_csm\": true\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"competitorKey\": \"beta-metrics\",\n      \"competitorName\": \"BetaMetrics Corp\",\n      \"hubspotRecordId\": \"comp_002\",\n      \"pricingUrl\": \"https://betametrics.example.com/pricing\",\n      \"scrapeMeta\": {\n        \"apifyRunId\": \"mock-run-0002\",\n        \"datasetId\": \"mock-dataset-0002\"\n      },\n      \"previousSnapshot\": {\n        \"capturedAt\": \"2026-11-09T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"per_seat\",\n        \"freeTrialDays\": 14,\n        \"tiers\": [\n          {\n            \"id\": \"free\",\n            \"name\": \"Free\",\n            \"monthlyPrice\": 0,\n            \"annualPricePerMonth\": 0,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 3,\n            \"includedSeats\": 3,\n            \"features\": {\n              \"tracked_events\": \"100k\",\n              \"data_retention\": \"30 days\",\n              \"integrations\": true,\n              \"alerts\": false\n            }\n          },\n          {\n            \"id\": \"team\",\n            \"name\": \"Team\",\n            \"monthlyPrice\": 29,\n            \"annualPricePerMonth\": 24,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 25,\n            \"includedSeats\": 1,\n            \"features\": {\n              \"tracked_events\": \"5M\",\n              \"data_retention\": \"1 year\",\n              \"integrations\": true,\n              \"alerts\": true\n            }\n          },\n          {\n            \"id\": \"scale\",\n            \"name\": \"Scale\",\n            \"monthlyPrice\": 79,\n            \"annualPricePerMonth\": 65,\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": \"unlimited\",\n            \"includedSeats\": 1,\n            \"features\": {\n              \"tracked_events\": \"50M\",\n              \"data_retention\": \"3 years\",\n              \"integrations\": true,\n              \"alerts\": true,\n              \"warehouse_sync\": true\n            }\n          }\n        ]\n      },\n      \"currentSnapshot\": {\n        \"capturedAt\": \"2026-11-16T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"usage_based\",\n        \"freeTrialDays\": null,\n        \"tiers\": [\n          {\n            \"id\": \"free\",\n            \"name\": \"Free\",\n            \"monthlyPrice\": 0,\n            \"annualPricePerMonth\": 0,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 3,\n            \"includedSeats\": 3,\n            \"features\": {\n              \"tracked_events\": \"100k\",\n              \"data_retention\": \"30 days\",\n              \"integrations\": true,\n              \"alerts\": false\n            }\n          },\n          {\n            \"id\": \"growth\",\n            \"name\": \"Growth\",\n            \"monthlyPrice\": 149,\n            \"annualPricePerMonth\": 124,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": \"unlimited\",\n            \"includedSeats\": \"unlimited\",\n            \"features\": {\n              \"tracked_events\": \"1M included, then metered\",\n              \"data_retention\": \"1 year\",\n              \"integrations\": true,\n              \"alerts\": true\n            }\n          },\n          {\n            \"id\": \"scale\",\n            \"name\": \"Scale\",\n            \"monthlyPrice\": \"Contact sales\",\n            \"annualPricePerMonth\": null,\n            \"isContactSales\": true,\n            \"billingUnit\": \"custom\",\n            \"seatLimit\": \"unlimited\",\n            \"includedSeats\": \"unlimited\",\n            \"features\": {\n              \"tracked_events\": \"custom\",\n              \"data_retention\": \"3 years\",\n              \"integrations\": true,\n              \"alerts\": true,\n              \"warehouse_sync\": true\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"competitorKey\": \"gamma-ledger\",\n      \"competitorName\": \"GammaLedger Labs\",\n      \"hubspotRecordId\": \"comp_003\",\n      \"pricingUrl\": \"https://gammaledger.example.com/pricing\",\n      \"scrapeMeta\": {\n        \"apifyRunId\": \"mock-run-0003\",\n        \"datasetId\": \"mock-dataset-0003\"\n      },\n      \"previousSnapshot\": {\n        \"capturedAt\": \"2026-11-09T06:00:00.000Z\",\n        \"currency\": \"EUR\",\n        \"pricingModel\": \"flat_rate\",\n        \"freeTrialDays\": 30,\n        \"tiers\": [\n          {\n            \"id\": \"essentials\",\n            \"name\": \"Essentials\",\n            \"monthlyPrice\": 39,\n            \"annualPricePerMonth\": 32,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 5,\n            \"includedSeats\": 5,\n            \"features\": {\n              \"ledgers\": \"3\",\n              \"multi_currency\": false,\n              \"approvals\": true\n            }\n          },\n          {\n            \"id\": \"plus\",\n            \"name\": \"Plus\",\n            \"monthlyPrice\": 89,\n            \"annualPricePerMonth\": 74,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 20,\n            \"includedSeats\": 20,\n            \"features\": {\n              \"ledgers\": \"15\",\n              \"multi_currency\": true,\n              \"approvals\": true\n            }\n          }\n        ]\n      },\n      \"currentSnapshot\": {\n        \"capturedAt\": \"2026-11-16T06:00:00.000Z\",\n        \"currency\": \"EUR\",\n        \"pricingModel\": \"flat_rate\",\n        \"freeTrialDays\": 30,\n        \"tiers\": [\n          {\n            \"id\": \"essentials\",\n            \"name\": \"Essentials\",\n            \"monthlyPrice\": 39,\n            \"annualPricePerMonth\": 32,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 5,\n            \"includedSeats\": 5,\n            \"features\": {\n              \"ledgers\": \"3\",\n              \"multi_currency\": false,\n              \"approvals\": true\n            }\n          },\n          {\n            \"id\": \"plus\",\n            \"name\": \"Plus\",\n            \"monthlyPrice\": 89,\n            \"annualPricePerMonth\": 74,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 20,\n            \"includedSeats\": 20,\n            \"features\": {\n              \"ledgers\": \"15\",\n              \"multi_currency\": true,\n              \"approvals\": true\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"competitorKey\": \"delta-signal\",\n      \"competitorName\": \"DeltaSignal Co\",\n      \"hubspotRecordId\": \"comp_004\",\n      \"pricingUrl\": \"https://deltasignal.example.com/pricing\",\n      \"scrapeMeta\": {\n        \"apifyRunId\": \"mock-run-0004\",\n        \"datasetId\": \"mock-dataset-0004\"\n      },\n      \"previousSnapshot\": null,\n      \"currentSnapshot\": {\n        \"capturedAt\": \"2026-11-16T06:00:00.000Z\",\n        \"currency\": \"GBP\",\n        \"pricingModel\": \"hybrid\",\n        \"freeTrialDays\": 7,\n        \"tiers\": [\n          {\n            \"id\": \"basic\",\n            \"name\": \"Basic\",\n            \"monthlyPrice\": \"£25\",\n            \"annualPricePerMonth\": \"£20\",\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 3,\n            \"includedSeats\": 3,\n            \"features\": [\n              \"Signal monitoring\",\n              \"Weekly digest\"\n            ]\n          },\n          {\n            \"id\": \"advanced\",\n            \"name\": \"Advanced\",\n            \"monthlyPrice\": \"£75\",\n            \"annualPricePerMonth\": \"£62\",\n            \"billingUnit\": \"per_seat_month\",\n            \"seatLimit\": 30,\n            \"includedSeats\": 3,\n            \"features\": [\n              \"Signal monitoring\",\n              \"Weekly digest\",\n              \"Realtime alerts\",\n              \"API access\"\n            ]\n          }\n        ]\n      }\n    },\n    {\n      \"competitorKey\": \"epsilon-grid\",\n      \"competitorName\": \"EpsilonGrid Ltd\",\n      \"hubspotRecordId\": \"comp_005\",\n      \"pricingUrl\": \"https://epsilongrid.example.com/pricing\",\n      \"scrapeMeta\": {\n        \"apifyRunId\": \"mock-run-0005\",\n        \"datasetId\": \"mock-dataset-0005\",\n        \"note\": \"Synthetic broken scrape: page layout changed, selector matched nothing.\"\n      },\n      \"previousSnapshot\": {\n        \"capturedAt\": \"2026-11-09T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"tiered\",\n        \"freeTrialDays\": null,\n        \"tiers\": [\n          {\n            \"id\": \"lite\",\n            \"name\": \"Lite\",\n            \"monthlyPrice\": 12,\n            \"annualPricePerMonth\": 10,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 1,\n            \"includedSeats\": 1,\n            \"features\": {\n              \"grids\": \"10\"\n            }\n          },\n          {\n            \"id\": \"standard\",\n            \"name\": \"Standard\",\n            \"monthlyPrice\": 36,\n            \"annualPricePerMonth\": 30,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": 10,\n            \"includedSeats\": 10,\n            \"features\": {\n              \"grids\": \"100\",\n              \"sharing\": true\n            }\n          },\n          {\n            \"id\": \"max\",\n            \"name\": \"Max\",\n            \"monthlyPrice\": 96,\n            \"annualPricePerMonth\": 80,\n            \"billingUnit\": \"per_month\",\n            \"seatLimit\": \"unlimited\",\n            \"includedSeats\": 25,\n            \"features\": {\n              \"grids\": \"unlimited\",\n              \"sharing\": true,\n              \"sso\": true\n            }\n          }\n        ]\n      },\n      \"currentSnapshot\": {\n        \"capturedAt\": \"2026-11-16T06:00:00.000Z\",\n        \"currency\": \"USD\",\n        \"pricingModel\": \"tiered\",\n        \"freeTrialDays\": null,\n        \"tiers\": []\n      }\n    }\n  ]\n};\n/* FIXTURE:END */\n\nif (!FIXTURE || !Array.isArray(FIXTURE.competitors) || FIXTURE.competitors.length === 0) {\n  throw new Error('Sandbox fixture is missing a non-empty competitors[] array.');\n}\n\nreturn FIXTURE.competitors.map((c, i) => ({\n  json: {\n    competitorKey: c.competitorKey,\n    competitorName: c.competitorName,\n    hubspotRecordId: c.hubspotRecordId ?? null,\n    sourceUrl: c.pricingUrl,\n    source: 'sandbox',\n    current: c.currentSnapshot ?? null,\n    previous: c.previousSnapshot ?? null,\n    previousSnapshotKey: null,\n    previousFingerprint: null,\n    fetchError: null,\n    scrapeMeta: c.scrapeMeta ?? null,\n  },\n  pairedItem: { item: 0 },\n}));\n"
+      },
+      "id": "a0811276-c221-4c1f-a8da-184480572436",
+      "name": "Load Sandbox Fixture",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Build Live Targets\n// One item per competitor from COMPETITOR_TARGETS_JSON, with the Apify actor\n// input attached. Only reached when SANDBOX_MODE=false and live prerequisites\n// (Apify token, HubSpot token, targets) are all present.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\n\nreturn cfg.competitorTargets.map((t) => ({\n  json: {\n    competitorKey: t.competitorKey,\n    competitorName: t.competitorName,\n    hubspotRecordId: t.hubspotRecordId,\n    sourceUrl: t.pricingUrl,\n    source: 'live',\n    apifyInput: {\n      ...cfg.apifyInputDefaults,\n      startUrls: [{ url: t.pricingUrl }],\n      competitorKey: t.competitorKey,\n      maxPagesPerCrawl: 1,\n      outputSchema: 'competitor-pricing-snapshot/v1',\n    },\n  },\n  pairedItem: { item: 0 },\n}));\n"
+      },
+      "id": "e17b2739-b08f-4d83-a557-f80a515c0686",
+      "name": "Build Live Targets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/{{ $('Config & Safety Gate').first().json.apifyActorId }}/run-sync-get-dataset-items?format=json&clean=true&timeout={{ $('Config & Safety Gate').first().json.apifyRunTimeoutSecs }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.APIFY_API_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.apifyInput) }}",
+        "options": {
+          "timeout": 300000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "4e15e175-2eeb-465c-a672-0a9dacec833c",
+      "name": "Apify: Run Pricing Scraper Actor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Live only. One synchronous actor run per competitor.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Attach Apify Result\n// Pairs each Apify response (text format, one per target, in order) with its\n// target, parses the dataset, and prepares the HubSpot \"previous snapshot\"\n// search body. Excludes this week's own record so re-runs never diff a\n// snapshot against itself, and ignores snapshots flagged invalid.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst targets = $('Build Live Targets').all();\nconst responses = $input.all();\n\nif (responses.length !== targets.length) {\n  throw new Error(`Apify response count (${responses.length}) does not match target count (${targets.length}); refusing to mis-pair snapshots.`);\n}\n\nconst errText = (e) => {\n  if (!e) return 'unknown error';\n  if (typeof e === 'string') return e.slice(0, 300);\n  return String(e.message || e.description || JSON.stringify(e)).slice(0, 300);\n};\n\nreturn responses.map((r, i) => {\n  const t = targets[i].json;\n  const body = r.json || {};\n  let current = null;\n  let fetchError = null;\n\n  if (body.error) {\n    fetchError = `Apify request failed: ${errText(body.error)}`;\n  } else {\n    let parsed = body.data;\n    if (typeof parsed === 'string') {\n      try { parsed = JSON.parse(parsed); } catch (e) { parsed = null; fetchError = 'Apify response was not valid JSON.'; }\n    }\n    const items = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);\n    const looksLikeSnapshot = (it) => it && typeof it === 'object' && (Array.isArray(it.tiers) || Array.isArray(it.plans) || (it.pricing && typeof it.pricing === 'object'));\n    const match = items.find((it) => looksLikeSnapshot(it) && it.competitorKey === t.competitorKey)\n      || items.find(looksLikeSnapshot)\n      || null;\n    if (!fetchError && !match) fetchError = 'Apify dataset contained no pricing snapshot item.';\n    if (match) current = { ...match, capturedAt: match.capturedAt || cfg.runStartedAt };\n  }\n\n  const { apifyInput, ...rest } = t;\n  return {\n    json: {\n      ...rest,\n      current,\n      fetchError,\n      currentSnapshotKey: `${t.competitorKey}__${cfg.isoWeek}`,\n      hubspotSearchBody: {\n        filterGroups: [{\n          filters: [\n            { propertyName: 'competitor_key', operator: 'EQ', value: t.competitorKey },\n            { propertyName: 'snapshot_key', operator: 'NEQ', value: `${t.competitorKey}__${cfg.isoWeek}` },\n            { propertyName: 'snapshot_valid', operator: 'EQ', value: 'true' },\n          ],\n        }],\n        sorts: [{ propertyName: 'snapshot_date', direction: 'DESCENDING' }],\n        properties: ['snapshot_key', 'snapshot_date', 'snapshot_json', 'snapshot_fingerprint'],\n        limit: 1,\n      },\n    },\n    pairedItem: { item: i },\n  };\n});\n"
+      },
+      "id": "e297228a-e9a6-4fa2-a81b-399f141470e7",
+      "name": "Attach Apify Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.hubapi.com/crm/v3/objects/{{ $('Config & Safety Gate').first().json.hubspotObjectType }}/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.hubspotSearchBody) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "41b25cbf-a908-4015-a484-0ca4dcaf35a5",
+      "name": "HubSpot: Fetch Previous Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Read-only search (crm.objects.custom.read).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Assemble Live Snapshot Pairs\n// Joins each HubSpot search response (in order) with its Apify result to\n// produce the { current, previous } pair the diff engine expects. A failed\n// lookup is treated as an error, never as \"first observation\", so a HubSpot\n// outage cannot silently reset history to a baseline.\n// ─────────────────────────────────────────────────────────────────────────────\nconst base = $('Attach Apify Result').all();\nconst responses = $input.all();\n\nif (responses.length !== base.length) {\n  throw new Error(`HubSpot lookup count (${responses.length}) does not match competitor count (${base.length}); refusing to mis-pair snapshots.`);\n}\n\nreturn responses.map((r, i) => {\n  const b = base[i].json;\n  const body = r.json || {};\n  let previous = null;\n  let previousSnapshotKey = null;\n  let previousFingerprint = null;\n  let fetchError = b.fetchError || null;\n\n  if (body.error) {\n    const msg = typeof body.error === 'string' ? body.error : (body.error.message || 'request failed');\n    fetchError = fetchError || `HubSpot previous-snapshot lookup failed: ${String(msg).slice(0, 300)}`;\n  } else {\n    const hit = Array.isArray(body.results) ? body.results[0] : null;\n    const props = hit && hit.properties ? hit.properties : null;\n    if (props && props.snapshot_json) {\n      try {\n        previous = JSON.parse(props.snapshot_json);\n        previousSnapshotKey = props.snapshot_key || null;\n        previousFingerprint = props.snapshot_fingerprint || null;\n      } catch (e) {\n        fetchError = fetchError || `Previous snapshot ${props.snapshot_key || '(unknown)'} has unparseable snapshot_json.`;\n      }\n    }\n  }\n\n  const { hubspotSearchBody, ...rest } = b;\n  return {\n    json: { ...rest, previous, previousSnapshotKey, previousFingerprint, fetchError },\n    pairedItem: { item: i },\n  };\n});\n"
+      },
+      "id": "9aa37cfc-5189-42fb-a7af-3dec1447a32a",
+      "name": "Assemble Live Snapshot Pairs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Pricing Diff & Intelligence Engine  (Run Once for All Items)\n// 1. Normalises current + previous pricing snapshots into a canonical shape.\n// 2. Fingerprints them; identical structure → fast \"no_change\" path.\n// 3. Computes structural diffs: pricing-model shifts, tier additions/removals/\n//    renames, monthly + annual price moves, contact-sales transitions, billing\n//    unit changes, seat limits, annual-discount shifts, free tier / trial\n//    changes, feature gating moves (up/down tiers), feature limit changes.\n// 4. Scores severity against env thresholds and flags suspect scrapes.\n// 5. Emits HubSpot custom-object upsert inputs (one record per competitor/week).\n// Pure JavaScript: no network, no require(), runs identically in the simulator.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst THRESHOLD = Number(cfg.priceChangeThresholdPct);\nconst DISCOUNT_PP = Number(cfg.annualDiscountShiftThresholdPp);\nconst SUSPECT_RATIO = Number(cfg.suspectTierRemovalRatio);\nconst MAX_TEXT = 60000;\n\nconst SEVERITIES = ['none', 'low', 'medium', 'high', 'critical'];\nconst sevRank = (s) => Math.max(0, SEVERITIES.indexOf(s));\nconst maxSev = (a, b) => (sevRank(a) >= sevRank(b) ? a : b);\nconst ALERT_MIN_RANK = sevRank(cfg.alertMinSeverity);\nconst MODELS = ['per_seat', 'flat_rate', 'usage_based', 'tiered', 'hybrid', 'unknown'];\n\n// ── Helpers ──────────────────────────────────────────────────────────────────\nconst round2 = (n) => Math.round(n * 100) / 100;\nconst slug = (v) => String(v ?? '').toLowerCase().normalize('NFKD')\n  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);\n\nconst toPrice = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? round2(v) : null;\n  const s = String(v).trim();\n  if (/^free$/i.test(s)) return 0;\n  if (/contact|custom|quote|talk to/i.test(s)) return null;\n  const m = s.replace(/,/g, '').match(/\\d+(\\.\\d+)?/);\n  if (!m) return null;\n  const n = parseFloat(m[0]);\n  return Number.isFinite(n) ? round2(n) : null;\n};\n\nconst toSeats = (v) => {\n  if (v === null || v === undefined || v === '') return null;\n  if (typeof v === 'string' && /unlimited|∞/i.test(v)) return 'unlimited';\n  const n = parseInt(String(v).replace(/,/g, ''), 10);\n  return Number.isFinite(n) && n >= 0 ? n : null;\n};\n\nconst normModel = (v) => {\n  const s = slug(v).replace(/-/g, '_');\n  const alias = { seat: 'per_seat', per_user: 'per_seat', flat: 'flat_rate', usage: 'usage_based', metered: 'usage_based', consumption: 'usage_based' };\n  const m = alias[s] || s;\n  return MODELS.includes(m) ? m : 'unknown';\n};\n\nconst normFeatures = (f) => {\n  const out = {};\n  if (Array.isArray(f)) {\n    for (const k of f) { const key = slug(k).replace(/-/g, '_'); if (key) out[key] = true; }\n  } else if (f && typeof f === 'object') {\n    for (const [k, v] of Object.entries(f)) {\n      const key = slug(k).replace(/-/g, '_');\n      if (!key) continue;\n      if (v === false || v === null || v === undefined || ['no', 'none', '-', '—', 'false'].includes(String(v).trim().toLowerCase())) out[key] = false;\n      else if (v === true || ['yes', 'included', 'true', '✓'].includes(String(v).trim().toLowerCase())) out[key] = true;\n      else out[key] = typeof v === 'number' ? v : String(v).trim();\n    }\n  }\n  return Object.fromEntries(Object.keys(out).sort().map((k) => [k, out[k]]));\n};\nconst featureOn = (v) => v !== false && v !== null && v !== undefined;\n\nconst normTier = (t, idx) => {\n  if (!t || typeof t !== 'object') return null;\n  const name = String(t.name ?? t.title ?? t.id ?? `Tier ${idx + 1}`).trim().slice(0, 80);\n  const monthlyRaw = t.monthlyPrice ?? t.priceMonthly ?? t.monthly;\n  const annualRaw = t.annualPricePerMonth ?? t.annualPrice ?? t.priceAnnualPerMonth ?? t.annual;\n  const monthlyPrice = toPrice(monthlyRaw);\n  const annualPricePerMonth = toPrice(annualRaw);\n  const label = `${t.priceLabel ?? ''} ${typeof monthlyRaw === 'string' ? monthlyRaw : ''}`;\n  const isContactSales = Boolean(t.isContactSales) || (monthlyPrice === null && annualPricePerMonth === null && /contact|custom|quote|talk to/i.test(label));\n  return {\n    id: slug(t.id ?? t.key ?? name) || `tier-${idx + 1}`,\n    name,\n    position: idx,\n    monthlyPrice: isContactSales ? null : monthlyPrice,\n    annualPricePerMonth: isContactSales ? null : annualPricePerMonth,\n    billingUnit: slug(t.billingUnit || (isContactSales ? 'custom' : 'per_month')).replace(/-/g, '_'),\n    seatLimit: toSeats(t.seatLimit),\n    includedSeats: toSeats(t.includedSeats),\n    isContactSales,\n    features: normFeatures(t.features),\n  };\n};\n\nconst normSnapshot = (raw) => {\n  if (!raw || typeof raw !== 'object') return null;\n  const src = raw.pricing && typeof raw.pricing === 'object' && !Array.isArray(raw.pricing) ? { ...raw, ...raw.pricing } : raw;\n  const list = Array.isArray(src.tiers) ? src.tiers : (Array.isArray(src.plans) ? src.plans : []);\n  const tiers = [];\n  const ids = new Set();\n  list.forEach((t, i) => {\n    const n = normTier(t, i);\n    if (!n) return;\n    let id = n.id; let k = 2;\n    while (ids.has(id)) id = `${n.id}-${k++}`;\n    ids.add(id);\n    tiers.push({ ...n, id, position: tiers.length });\n  });\n  const trial = src.freeTrialDays === null || src.freeTrialDays === undefined ? null : parseInt(src.freeTrialDays, 10);\n  return {\n    capturedAt: src.capturedAt ? new Date(src.capturedAt).toISOString() : null,\n    currency: String(src.currency || 'USD').toUpperCase().slice(0, 3),\n    pricingModel: normModel(src.pricingModel),\n    freeTrialDays: Number.isFinite(trial) ? trial : null,\n    tiers,\n  };\n};\n\nconst stable = (v) => {\n  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;\n  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}`;\n  return JSON.stringify(v);\n};\nconst fnv1a = (str, seed) => {\n  let h = seed >>> 0;\n  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h.toString(16).padStart(8, '0');\n};\nconst fingerprint = (snap) => {\n  const { capturedAt, ...structure } = snap;\n  const s = stable(structure);\n  return `fp-${fnv1a(s, 0x811c9dc5)}${fnv1a(s, 0x01000193)}`;\n};\n\nconst isoWeek = (d) => {\n  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));\n  const day = date.getUTCDay() || 7;\n  date.setUTCDate(date.getUTCDate() + 4 - day);\n  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));\n  return `${date.getUTCFullYear()}-W${String(Math.ceil(((date - yearStart) / 86400000 + 1) / 7)).padStart(2, '0')}`;\n};\n\nconst SYMBOLS = { USD: '$', EUR: '€', GBP: '£', CAD: 'CA$', AUD: 'A$', JPY: '¥', INR: '₹' };\nconst money = (v, cur) => (v === null || v === undefined ? 'n/a' : `${SYMBOLS[cur] || `${cur} `}${Number(v).toFixed(2)}`);\nconst pct = (a, b) => (a > 0 && b !== null ? round2(((b - a) / a) * 100) : null);\nconst signed = (n) => `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;\nconst discountPct = (t) => (t.monthlyPrice > 0 && t.annualPricePerMonth !== null ? round2(((t.monthlyPrice - t.annualPricePerMonth) / t.monthlyPrice) * 100) : null);\nconst fmtSeats = (v) => (v === null ? 'not stated' : String(v));\n\nconst metrics = (snap) => {\n  const paid = snap.tiers.map((t) => t.monthlyPrice).filter((p) => p !== null && p > 0);\n  const listed = snap.tiers.map((t) => t.monthlyPrice).filter((p) => p !== null);\n  const discounts = snap.tiers.map(discountPct).filter((d) => d !== null);\n  return {\n    tierCount: snap.tiers.length,\n    lowestPaidMonthly: paid.length ? Math.min(...paid) : null,\n    highestListedMonthly: listed.length ? Math.max(...listed) : null,\n    hasFreeTier: snap.tiers.some((t) => t.monthlyPrice === 0),\n    contactSalesTiers: snap.tiers.filter((t) => t.isContactSales).length,\n    avgAnnualDiscountPct: discounts.length ? round2(discounts.reduce((a, b) => a + b, 0) / discounts.length) : null,\n  };\n};\n\nconst priceSeverity = (p, direction) => {\n  const a = Math.abs(p);\n  if (direction === 'increase' && a >= THRESHOLD * 2) return 'critical';\n  if (a >= THRESHOLD) return 'high';\n  return 'low';\n};\n\n// Rank tiers by entry price (contact-sales last) to reason about feature gating.\nconst tierRanks = (snap) => {\n  const ordered = [...snap.tiers].sort((a, b) => {\n    const pa = a.isContactSales ? Infinity : (a.monthlyPrice ?? Infinity);\n    const pb = b.isContactSales ? Infinity : (b.monthlyPrice ?? Infinity);\n    return pa - pb || a.position - b.position;\n  });\n  return new Map(ordered.map((t, i) => [t.id, i]));\n};\nconst lowestTierWith = (snap, ranks, feature) => {\n  let best = null;\n  for (const t of snap.tiers) {\n    if (!featureOn(t.features[feature])) continue;\n    if (!best || ranks.get(t.id) < ranks.get(best.id)) best = t;\n  }\n  return best;\n};\n\n// ── Structural diff ─────────────────────────────────────────────────────────\nconst diffSnapshots = (prev, curr) => {\n  const changes = [];\n  const add = (c) => changes.push(c);\n  const cur = curr.currency;\n  const comparable = prev.currency === curr.currency;\n\n  if (!comparable) {\n    add({ type: 'currency_changed', severity: 'high', before: prev.currency, after: curr.currency,\n      message: `Displayed currency changed ${prev.currency} → ${curr.currency}; price percentages suppressed.` });\n  }\n  if (prev.pricingModel !== curr.pricingModel) {\n    add({ type: 'pricing_model_shift', severity: 'critical', before: prev.pricingModel, after: curr.pricingModel,\n      message: `Pricing model shifted ${prev.pricingModel} → ${curr.pricingModel}.` });\n  }\n  if (prev.freeTrialDays !== curr.freeTrialDays) {\n    const msg = curr.freeTrialDays === null ? `Free trial removed (was ${prev.freeTrialDays} days).`\n      : prev.freeTrialDays === null ? `Free trial introduced (${curr.freeTrialDays} days).`\n      : `Free trial changed ${prev.freeTrialDays} → ${curr.freeTrialDays} days.`;\n    add({ type: 'free_trial_changed', severity: 'medium', before: prev.freeTrialDays, after: curr.freeTrialDays, message: msg });\n  }\n\n  // Tier matching: by id, then rename detection (same slot + identical prices).\n  const prevById = new Map(prev.tiers.map((t) => [t.id, t]));\n  const currById = new Map(curr.tiers.map((t) => [t.id, t]));\n  const pairs = [];\n  const prevToCurr = new Map();\n  for (const p of prev.tiers) if (currById.has(p.id)) { pairs.push([p, currById.get(p.id)]); prevToCurr.set(p.id, p.id); }\n  let removed = prev.tiers.filter((t) => !currById.has(t.id));\n  let added = curr.tiers.filter((t) => !prevById.has(t.id));\n  for (const r of [...removed]) {\n    const m = added.find((a) => a.position === r.position && a.monthlyPrice === r.monthlyPrice\n      && a.annualPricePerMonth === r.annualPricePerMonth && a.isContactSales === r.isContactSales);\n    if (m) {\n      pairs.push([r, m]);\n      prevToCurr.set(r.id, m.id);\n      removed = removed.filter((x) => x !== r);\n      added = added.filter((x) => x !== m);\n    }\n  }\n  for (const r of removed) {\n    add({ type: 'tier_removed', severity: 'high', tierId: r.id, tierName: r.name, before: r.name, after: null,\n      message: `Tier \"${r.name}\" removed${r.monthlyPrice !== null ? ` (was ${money(r.monthlyPrice, prev.currency)}/mo)` : ''}.` });\n  }\n  for (const a of added) {\n    add({ type: 'tier_added', severity: 'medium', tierId: a.id, tierName: a.name, before: null, after: a.name,\n      message: `Tier \"${a.name}\" added${a.isContactSales ? ' (contact sales)' : a.monthlyPrice !== null ? ` at ${money(a.monthlyPrice, cur)}/mo` : ''}.` });\n  }\n\n  let maxPriceChangePct = null;\n  const trackPct = (p) => { if (p !== null && (maxPriceChangePct === null || Math.abs(p) > Math.abs(maxPriceChangePct))) maxPriceChangePct = p; };\n\n  for (const [p, c] of pairs) {\n    const tier = { tierId: c.id, tierName: c.name };\n    if (p.name !== c.name) {\n      add({ ...tier, type: 'tier_renamed', severity: 'low', before: p.name, after: c.name, message: `Tier \"${p.name}\" renamed to \"${c.name}\".` });\n    }\n    if (!p.isContactSales && c.isContactSales) {\n      add({ ...tier, type: 'moved_to_contact_sales', severity: 'critical', before: p.monthlyPrice, after: null,\n        message: `\"${c.name}\" pricing hidden behind contact sales (was ${money(p.monthlyPrice, prev.currency)}/mo).` });\n      continue;\n    }\n    if (p.isContactSales && !c.isContactSales) {\n      add({ ...tier, type: 'price_published', severity: 'medium', before: null, after: c.monthlyPrice,\n        message: `\"${c.name}\" now publishes pricing at ${money(c.monthlyPrice, cur)}/mo (was contact sales).` });\n    }\n    if (p.billingUnit !== c.billingUnit) {\n      add({ ...tier, type: 'billing_unit_changed', severity: 'high', before: p.billingUnit, after: c.billingUnit,\n        message: `\"${c.name}\" billing unit changed ${p.billingUnit} → ${c.billingUnit}.` });\n    }\n    for (const [field, label] of [['monthlyPrice', 'monthly'], ['annualPricePerMonth', 'annual (per mo)']]) {\n      const a = p[field]; const b = c[field];\n      if (a === b || p.isContactSales || c.isContactSales) continue;\n      if (a !== null && b === null) {\n        add({ ...tier, type: 'price_unpublished', severity: 'medium', field, before: a, after: null, message: `\"${c.name}\" ${label} price no longer listed.` });\n        continue;\n      }\n      if (a === null && b !== null) {\n        add({ ...tier, type: 'price_published', severity: 'low', field, before: null, after: b, message: `\"${c.name}\" ${label} price now listed at ${money(b, cur)}.` });\n        continue;\n      }\n      if (!comparable) continue;\n      if (a === 0 && b > 0) {\n        add({ ...tier, type: 'price_increase', severity: 'high', field, before: a, after: b, pctChange: null,\n          message: `\"${c.name}\" ${label} went from free to ${money(b, cur)}.` });\n        continue;\n      }\n      const change = pct(a, b);\n      if (change === null) continue;\n      const direction = change > 0 ? 'increase' : 'decrease';\n      trackPct(change);\n      add({ ...tier, type: `price_${direction}`, severity: priceSeverity(change, direction), field, before: a, after: b, pctChange: change,\n        material: Math.abs(change) >= THRESHOLD,\n        message: `\"${c.name}\" ${label} ${money(a, cur)} → ${money(b, cur)} (${signed(change)}).` });\n    }\n    const da = discountPct(p); const db = discountPct(c);\n    if (da !== null && db !== null && Math.abs(db - da) >= DISCOUNT_PP) {\n      add({ ...tier, type: 'annual_discount_shift', severity: 'medium', before: da, after: db, pctChange: round2(db - da),\n        message: `\"${c.name}\" annual discount ${da.toFixed(1)}% → ${db.toFixed(1)}% (${db - da > 0 ? '+' : ''}${(db - da).toFixed(1)} pp).` });\n    }\n    for (const [field, label] of [['seatLimit', 'seat limit'], ['includedSeats', 'included seats']]) {\n      if (p[field] !== c[field]) {\n        add({ ...tier, type: field === 'seatLimit' ? 'seat_limit_changed' : 'included_seats_changed', severity: 'medium', field, before: p[field], after: c[field],\n          message: `\"${c.name}\" ${label} ${fmtSeats(p[field])} → ${fmtSeats(c[field])}.` });\n      }\n    }\n    for (const fk of Object.keys(c.features)) {\n      const fa = p.features[fk]; const fb = c.features[fk];\n      if (featureOn(fa) && featureOn(fb) && fa !== true && fb !== true && String(fa) !== String(fb)) {\n        add({ ...tier, type: 'feature_limit_changed', severity: 'low', feature: fk, before: fa, after: fb,\n          message: `\"${c.name}\" ${fk} limit ${fa} → ${fb}.` });\n      }\n    }\n  }\n\n  // Feature gating across the whole page.\n  const prevRanks = tierRanks(prev); const currRanks = tierRanks(curr);\n  const allFeatures = new Set();\n  for (const t of [...prev.tiers, ...curr.tiers]) Object.keys(t.features).forEach((k) => allFeatures.add(k));\n  for (const fk of [...allFeatures].sort()) {\n    const pLow = lowestTierWith(prev, prevRanks, fk);\n    const cLow = lowestTierWith(curr, currRanks, fk);\n    if (!pLow && cLow) {\n      add({ type: 'feature_added', severity: 'low', feature: fk, tierId: cLow.id, tierName: cLow.name, before: null, after: cLow.name,\n        message: `Feature \"${fk}\" now offered (from \"${cLow.name}\").` });\n    } else if (pLow && !cLow) {\n      add({ type: 'feature_removed', severity: 'medium', feature: fk, tierId: pLow.id, tierName: pLow.name, before: pLow.name, after: null,\n        message: `Feature \"${fk}\" no longer offered on any tier (was from \"${pLow.name}\").` });\n    } else if (pLow && cLow) {\n      const mapped = prevToCurr.get(pLow.id);\n      if (mapped === cLow.id) continue;\n      let direction;\n      if (mapped && currRanks.has(mapped)) direction = currRanks.get(cLow.id) > currRanks.get(mapped) ? 'up' : 'down';\n      else {\n        const pe = pLow.isContactSales ? Infinity : (pLow.monthlyPrice ?? Infinity);\n        const ce = cLow.isContactSales ? Infinity : (cLow.monthlyPrice ?? Infinity);\n        if (pe === ce) continue;\n        direction = ce > pe ? 'up' : 'down';\n      }\n      add({ type: direction === 'up' ? 'feature_gated_up' : 'feature_gated_down', severity: 'medium', feature: fk,\n        tierId: cLow.id, tierName: cLow.name, before: pLow.name, after: cLow.name,\n        message: direction === 'up'\n          ? `Feature \"${fk}\" moved up-market: now requires \"${cLow.name}\" (was \"${pLow.name}\").`\n          : `Feature \"${fk}\" moved down-market: now available from \"${cLow.name}\" (was \"${pLow.name}\").` });\n    }\n  }\n\n  // Snapshot-level free tier signal.\n  const pm = metrics(prev); const cm = metrics(curr);\n  if (pm.hasFreeTier && !cm.hasFreeTier) add({ type: 'free_tier_removed', severity: 'high', before: true, after: false, message: 'Free tier removed.' });\n  if (!pm.hasFreeTier && cm.hasFreeTier) add({ type: 'free_tier_added', severity: 'high', before: false, after: true, message: 'Free tier introduced.' });\n\n  const removalRatio = prev.tiers.length ? removed.length / prev.tiers.length : 0;\n  return { changes, maxPriceChangePct, removedCount: removed.length, addedCount: added.length, removalRatio };\n};\n\nconst severityOrder = (a, b) => sevRank(b.severity) - sevRank(a.severity);\nconst clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);\n\n// ── Per-competitor analysis ─────────────────────────────────────────────────\nconst analyse = (j, key) => {\n  const name = String(j.competitorName || key);\n  const snapshotKey = `${key}__${cfg.isoWeek}`;\n  const base = {\n    competitorKey: key, competitorName: name, hubspotRecordId: j.hubspotRecordId ?? null,\n    sourceUrl: j.sourceUrl ?? null, source: j.source ?? 'unknown', snapshotKey,\n    previousSnapshotKey: j.previousSnapshotKey ?? null, reviewReasons: [], changes: [],\n  };\n\n  if (j.fetchError || !j.current) {\n    return { ...base, status: 'fetch_failed', severity: 'none', alertWorthy: false, requiresReview: true,\n      reviewReasons: [j.fetchError || 'No current snapshot was returned.'], headline: `${name}: snapshot unavailable — ${j.fetchError || 'no data'}`,\n      record: null };\n  }\n\n  const curr = normSnapshot(j.current);\n  const prev = j.previous ? normSnapshot(j.previous) : null;\n  if (!curr.capturedAt) curr.capturedAt = cfg.runStartedAt;\n  const currFp = fingerprint(curr);\n  const prevFp = prev ? fingerprint(prev) : null;\n  const previousSnapshotKey = base.previousSnapshotKey || (prev && prev.capturedAt ? `${key}__${isoWeek(new Date(prev.capturedAt))}` : null);\n\n  let status; let changes = []; let severity = 'none'; let maxPriceChangePct = null;\n  let removedCount = 0; let addedCount = 0; let snapshotValid = true;\n  const reviewReasons = [];\n\n  if (curr.tiers.length === 0) {\n    status = 'review_required';\n    snapshotValid = false;\n    reviewReasons.push('Scrape returned zero pricing tiers (likely page layout change or blocked crawl). Diff skipped; previous valid snapshot retained as baseline.');\n  } else if (!prev) {\n    status = 'baseline';\n  } else if (prevFp === currFp) {\n    status = 'no_change';\n  } else {\n    const d = diffSnapshots(prev, curr);\n    changes = d.changes.sort(severityOrder);\n    maxPriceChangePct = d.maxPriceChangePct;\n    removedCount = d.removedCount; addedCount = d.addedCount;\n    severity = changes.reduce((s, c) => maxSev(s, c.severity), 'none');\n    status = changes.length ? 'changed' : 'no_change';\n    if (d.removalRatio > SUSPECT_RATIO) {\n      status = 'review_required';\n      snapshotValid = false;\n      reviewReasons.push(`${Math.round(d.removalRatio * 100)}% of previous tiers disappeared in one run (threshold ${Math.round(SUSPECT_RATIO * 100)}%). Confirm on the live page, then set snapshot_valid=true in HubSpot.`);\n    }\n  }\n\n  const requiresReview = reviewReasons.length > 0;\n  const alertWorthy = requiresReview || (status === 'changed' && sevRank(severity) >= ALERT_MIN_RANK);\n  const count = (pred) => changes.filter(pred).length;\n  const counts = {\n    total: changes.length,\n    material: count((c) => sevRank(c.severity) >= sevRank('high')),\n    priceIncreases: count((c) => c.type === 'price_increase'),\n    priceDecreases: count((c) => c.type === 'price_decrease'),\n    tiersAdded: addedCount,\n    tiersRemoved: removedCount,\n    featureGatingMoves: count((c) => c.type === 'feature_gated_up' || c.type === 'feature_gated_down'),\n    pricingModelShift: changes.some((c) => c.type === 'pricing_model_shift'),\n  };\n\n  let headline;\n  if (status === 'baseline') headline = `${name}: baseline captured (${curr.tiers.length} tiers, ${curr.pricingModel}).`;\n  else if (status === 'no_change') headline = `${name}: no structural pricing change.`;\n  else if (curr.tiers.length === 0) headline = `${name}: scrape returned no tiers — needs review.`;\n  else {\n    const bits = [];\n    if (counts.pricingModelShift) bits.push('pricing model shift');\n    if (counts.priceIncreases) bits.push(`${counts.priceIncreases} price increase${counts.priceIncreases > 1 ? 's' : ''}`);\n    if (counts.priceDecreases) bits.push(`${counts.priceDecreases} price decrease${counts.priceDecreases > 1 ? 's' : ''}`);\n    if (addedCount) bits.push(`${addedCount} tier${addedCount > 1 ? 's' : ''} added`);\n    if (removedCount) bits.push(`${removedCount} tier${removedCount > 1 ? 's' : ''} removed`);\n    if (counts.featureGatingMoves) bits.push(`${counts.featureGatingMoves} feature gating move${counts.featureGatingMoves > 1 ? 's' : ''}`);\n    const other = counts.total - counts.priceIncreases - counts.priceDecreases - addedCount - removedCount - counts.featureGatingMoves - (counts.pricingModelShift ? 1 : 0);\n    if (other > 0) bits.push(`${other} other change${other > 1 ? 's' : ''}`);\n    headline = `${name}: ${bits.join(', ')}${maxPriceChangePct !== null ? ` (max ${signed(maxPriceChangePct)})` : ''}.`;\n  }\n\n  const currMetrics = metrics(curr);\n  const diffSummary = clip(changes.length ? changes.map((c) => `[${c.severity.toUpperCase()}] ${c.message}`).join('\\n') : headline, 5000);\n  let diffJson = JSON.stringify(changes);\n  let diffTruncated = false;\n  if (diffJson.length > MAX_TEXT) { diffJson = JSON.stringify(changes.slice(0, 50)); diffTruncated = true; }\n  const snapshotJson = JSON.stringify(curr);\n  if (snapshotJson.length > MAX_TEXT) {\n    snapshotValid = false;\n    reviewReasons.push(`Normalised snapshot exceeds ${MAX_TEXT} characters and cannot be stored as a future baseline.`);\n  }\n\n  const properties = {\n    snapshot_key: snapshotKey,\n    competitor_key: key,\n    competitor_name: name,\n    competitor_record_id: j.hubspotRecordId ?? undefined,\n    snapshot_date: cfg.runDate,\n    snapshot_status: status,\n    snapshot_valid: String(snapshotValid),\n    source_url: j.sourceUrl ?? undefined,\n    data_source: j.source ?? 'unknown',\n    pricing_model: curr.pricingModel,\n    currency: curr.currency,\n    tier_count: currMetrics.tierCount,\n    lowest_paid_monthly_price: currMetrics.lowestPaidMonthly ?? undefined,\n    highest_listed_monthly_price: currMetrics.highestListedMonthly ?? undefined,\n    change_severity: severity,\n    change_count: counts.total,\n    material_change_count: counts.material,\n    max_price_change_pct: maxPriceChangePct ?? undefined,\n    price_increase_count: counts.priceIncreases,\n    price_decrease_count: counts.priceDecreases,\n    tiers_added_count: addedCount,\n    tiers_removed_count: removedCount,\n    pricing_model_shift: String(counts.pricingModelShift),\n    requires_review: String(reviewReasons.length > 0),\n    review_reasons: reviewReasons.length ? clip(reviewReasons.join('\\n'), 5000) : undefined,\n    diff_summary: diffSummary,\n    diff_json: diffJson,\n    diff_truncated: String(diffTruncated),\n    snapshot_json: snapshotJson.length > MAX_TEXT ? undefined : snapshotJson,\n    snapshot_fingerprint: currFp,\n    previous_snapshot_key: previousSnapshotKey ?? undefined,\n    run_id: cfg.runId,\n  };\n  for (const k of Object.keys(properties)) if (properties[k] === undefined || properties[k] === null) delete properties[k];\n  for (const k of Object.keys(properties)) if (typeof properties[k] === 'number') properties[k] = String(properties[k]);\n\n  return {\n    ...base,\n    status,\n    severity,\n    alertWorthy: alertWorthy || reviewReasons.length > 0,\n    requiresReview: reviewReasons.length > 0,\n    reviewReasons,\n    headline,\n    changes,\n    counts,\n    maxPriceChangePct,\n    previousSnapshotKey,\n    snapshotValid,\n    fingerprint: { previous: prevFp, current: currFp },\n    metrics: { previous: prev ? metrics(prev) : null, current: currMetrics },\n    currency: curr.currency,\n    pricingModel: { previous: prev ? prev.pricingModel : null, current: curr.pricingModel },\n    record: { idProperty: 'snapshot_key', id: snapshotKey, properties },\n  };\n};\n\n// ── Main ────────────────────────────────────────────────────────────────────\nconst results = [];\nconst errors = [];\n$input.all().forEach((item, idx) => {\n  const j = item.json || {};\n  const key = slug(j.competitorKey || j.competitorName) || `competitor-${idx + 1}`;\n  try {\n    results.push(analyse(j, key));\n  } catch (e) {\n    errors.push({ competitorKey: key, stage: 'diff_engine', message: String(e && e.message ? e.message : e).slice(0, 300) });\n    results.push({ competitorKey: key, competitorName: String(j.competitorName || key), status: 'engine_error', severity: 'none',\n      alertWorthy: true, requiresReview: true, reviewReasons: [`Diff engine error: ${String(e && e.message ? e.message : e).slice(0, 200)}`],\n      headline: `${j.competitorName || key}: diff engine error.`, changes: [], record: null });\n  }\n});\n\nconst hubspotRecords = results.filter((r) => r.record).map((r) => r.record);\nconst bySeverity = Object.fromEntries(SEVERITIES.map((s) => [s, results.filter((r) => r.severity === s).length]));\nconst byStatus = {};\nfor (const r of results) byStatus[r.status] = (byStatus[r.status] || 0) + 1;\n\nreturn [{\n  json: {\n    runId: cfg.runId,\n    modeLabel: cfg.modeLabel,\n    isoWeek: cfg.isoWeek,\n    thresholds: { priceChangeThresholdPct: THRESHOLD, annualDiscountShiftThresholdPp: DISCOUNT_PP, suspectTierRemovalRatio: SUSPECT_RATIO, alertMinSeverity: cfg.alertMinSeverity },\n    results: results.map(({ record, ...rest }) => rest),\n    hubspotRecords,\n    stats: {\n      competitorsProcessed: results.length,\n      byStatus,\n      bySeverity,\n      alertWorthy: results.filter((r) => r.alertWorthy).length,\n      totalChanges: results.reduce((a, r) => a + (r.changes ? r.changes.length : 0), 0),\n      recordsPrepared: hubspotRecords.length,\n    },\n    errors,\n  },\n}];\n"
+      },
+      "id": "6df63c6d-5e1f-42c9-a859-072da3ff22cb",
+      "name": "Pricing Diff & Intelligence Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Build HubSpot Batches\n// Chunks upsert inputs into HubSpot-sized batches (max 100, default 50).\n// Always emits at least one item so the write gate IF node always executes.\n// allowWrite is true ONLY when the Config & Safety Gate opened the CRM gate.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst engine = $input.first().json;\nconst records = Array.isArray(engine.hubspotRecords) ? engine.hubspotRecords : [];\nconst size = Math.min(100, Math.max(1, Number(cfg.hubspotBatchSize) || 50));\n\nif (records.length === 0) {\n  return [{ json: { empty: true, allowWrite: false, batchIndex: -1, batchCount: 0, recordKeys: [], request: { inputs: [] } } }];\n}\n\nconst batches = [];\nfor (let i = 0; i < records.length; i += size) batches.push(records.slice(i, i + size));\n\nreturn batches.map((inputs, i) => ({\n  json: {\n    empty: false,\n    allowWrite: cfg.allowHubspotWrite === true,\n    batchIndex: i,\n    batchCount: batches.length,\n    objectType: cfg.hubspotObjectType,\n    recordKeys: inputs.map((r) => r.id),\n    request: { inputs },\n  },\n  pairedItem: { item: 0 },\n}));\n"
+      },
+      "id": "4cf44595-b668-45e2-aa01-3fd8cd2ea05b",
+      "name": "Build HubSpot Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e5d37b2b-00de-44b4-a55f-89d78ed9123d",
+              "leftValue": "={{ $json.allowWrite }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fb17e8ff-88ef-4be9-a889-bfbb79bf1a45",
+      "name": "Gate: Live CRM Write Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2280,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.hubapi.com/crm/v3/objects/{{ $('Config & Safety Gate').first().json.hubspotObjectType }}/batch/upsert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "4052e375-c8e4-46aa-ad48-8a286db5922f",
+      "name": "HubSpot: Batch Upsert Snapshots",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2500,
+        -20
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Idempotent upsert on unique snapshot_key (crm.objects.custom.write).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Collect HubSpot Write Results\n// Correlates each batch upsert response (in order) with its batch and reports\n// written vs failed record keys. Never throws on partial failure: failures are\n// surfaced to the Execution Summary and the ops alert gate.\n// ─────────────────────────────────────────────────────────────────────────────\nconst batches = $('Build HubSpot Batches').all();\nconst responses = $input.all();\nconst failures = [];\nlet recordsWritten = 0;\nlet recordsAttempted = 0;\n\nresponses.forEach((r, i) => {\n  const b = batches[i] ? batches[i].json : { recordKeys: [], batchIndex: i };\n  const body = r.json || {};\n  recordsAttempted += b.recordKeys.length;\n  if (body.error) {\n    const msg = typeof body.error === 'string' ? body.error : (body.error.message || 'request failed');\n    failures.push({ batchIndex: b.batchIndex, recordKeys: b.recordKeys, message: String(msg).slice(0, 300) });\n    return;\n  }\n  const ok = Array.isArray(body.results) ? body.results.length : 0;\n  recordsWritten += ok;\n  if (Array.isArray(body.errors) && body.errors.length) {\n    body.errors.forEach((e) => failures.push({ batchIndex: b.batchIndex, recordKeys: (e.context && e.context.ids) || [], message: String(e.message || e.category || 'record error').slice(0, 300) }));\n  } else if (ok < b.recordKeys.length) {\n    failures.push({ batchIndex: b.batchIndex, recordKeys: b.recordKeys, message: `HubSpot returned ${ok} of ${b.recordKeys.length} records.` });\n  }\n});\n\nreturn [{\n  json: {\n    writeMode: 'live',\n    batchesAttempted: responses.length,\n    recordsAttempted,\n    recordsWritten,\n    failures,\n    ok: failures.length === 0,\n  },\n}];\n"
+      },
+      "id": "4ec1fb4d-7ce9-463d-aef4-289c03c2c62f",
+      "name": "Collect HubSpot Write Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Dry-Run Write Preview\n// Reached whenever the CRM write gate is closed. Shows exactly what WOULD be\n// written to HubSpot (endpoint, record keys, one sample record) — no network.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst batches = $input.all().map((i) => i.json).filter((b) => !b.empty);\nconst inputs = batches.flatMap((b) => b.request.inputs);\nconst sample = inputs[0]\n  ? {\n    idProperty: inputs[0].idProperty,\n    id: inputs[0].id,\n    properties: Object.fromEntries(Object.entries(inputs[0].properties)\n      .map(([k, v]) => [k, typeof v === 'string' && v.length > 240 ? `${v.slice(0, 240)}… (${v.length} chars)` : v])),\n  }\n  : null;\n\nreturn [{\n  json: {\n    writeMode: 'preview',\n    blockedReason: inputs.length ? cfg.writeBlockedReason : 'nothing_to_write',\n    endpoint: `POST https://api.hubapi.com/crm/v3/objects/${cfg.hubspotObjectType}/batch/upsert`,\n    portalId: cfg.hubspotPortalId,\n    wouldWriteBatches: batches.length,\n    wouldWriteRecords: inputs.length,\n    recordKeys: inputs.map((r) => r.id),\n    sampleRecord: sample,\n    recordsWritten: 0,\n    failures: [],\n    ok: true,\n  },\n}];\n"
+      },
+      "id": "abd0f016-143e-4060-a79e-810fb69cf1db",
+      "name": "Dry-Run Write Preview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// RevOps Slack Block Kit Alert Builder\n// Formats alert-worthy competitor changes into a Block Kit payload (≤ 50\n// blocks, section text ≤ 3000 chars). The payload is always built so it can be\n// previewed in dry runs; it is only SENT when allowSlackSend is true.\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst engine = $('Pricing Diff & Intelligence Engine').first().json;\n\nlet write = null;\ntry { write = $('Collect HubSpot Write Results').first().json; } catch (e) { /* not executed */ }\nif (!write) { try { write = $('Dry-Run Write Preview').first().json; } catch (e) { /* not executed */ } }\n\nconst SEV_ORDER = ['none', 'low', 'medium', 'high', 'critical'];\nconst SEV_ICON = { critical: ':red_circle:', high: ':large_orange_circle:', medium: ':large_yellow_circle:', low: ':white_circle:', none: ':white_circle:' };\nconst TYPE_ICON = {\n  price_increase: ':arrow_up:', price_decrease: ':arrow_down:', pricing_model_shift: ':arrows_counterclockwise:',\n  tier_added: ':heavy_plus_sign:', tier_removed: ':heavy_minus_sign:', moved_to_contact_sales: ':lock:',\n  feature_gated_up: ':arrow_heading_up:', feature_gated_down: ':arrow_heading_down:', free_tier_removed: ':no_entry:',\n  free_tier_added: ':gift:', free_trial_changed: ':hourglass_flowing_sand:', tier_renamed: ':label:', billing_unit_changed: ':receipt:', annual_discount_shift: ':calendar:', seat_limit_changed: ':busts_in_silhouette:',\n};\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);\n\nconst alerts = engine.results\n  .filter((r) => r.alertWorthy)\n  .sort((a, b) => SEV_ORDER.indexOf(b.severity) - SEV_ORDER.indexOf(a.severity) || a.competitorName.localeCompare(b.competitorName));\n\nconst modeBadge = cfg.modeLabel === 'LIVE' ? ':satellite_antenna: LIVE' : cfg.modeLabel === 'SANDBOX' ? ':test_tube: SANDBOX (synthetic data)' : ':eyes: LIVE DRY RUN';\nconst s = engine.stats;\nconst writeLine = !write ? 'HubSpot: not attempted'\n  : write.writeMode === 'live' ? `HubSpot: ${write.recordsWritten} record(s) upserted${write.failures.length ? `, ${write.failures.length} failure(s)` : ''}`\n  : `HubSpot: preview only (${write.wouldWriteRecords} record(s), ${write.blockedReason})`;\n\nconst blocks = [\n  { type: 'header', text: { type: 'plain_text', text: clip(`Competitor pricing changes · ${engine.isoWeek}`, 150), emoji: true } },\n  { type: 'context', elements: [{ type: 'mrkdwn', text: clip(`${modeBadge}  ·  Run \\`${esc(engine.runId)}\\`  ·  ${s.competitorsProcessed} tracked  ·  ${alerts.length} need attention  ·  threshold ±${engine.thresholds.priceChangeThresholdPct}%`, 3000) }] },\n  { type: 'divider' },\n];\n\nconst MAX_COMPETITORS = 10;\nfor (const r of alerts.slice(0, MAX_COMPETITORS)) {\n  const link = r.sourceUrl ? `  ·  <${r.sourceUrl}|pricing page>` : '';\n  const sev = r.requiresReview && r.severity === 'none' ? ':warning: REVIEW' : `${SEV_ICON[r.severity]} ${r.severity.toUpperCase()}`;\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(`*${esc(r.competitorName)}*  ·  ${sev}${link}\\n${esc(r.headline)}`, 3000) } });\n\n  const top = (r.changes || []).slice(0, 6);\n  if (top.length) {\n    const lines = top.map((c) => `${TYPE_ICON[c.type] || ':small_blue_diamond:'} ${esc(c.message)}`);\n    if (r.changes.length > top.length) lines.push(`_…and ${r.changes.length - top.length} more (see HubSpot record \\`${esc(r.snapshotKey)}\\`)_`);\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: clip(lines.join('\\n'), 3000) } });\n  }\n  if (r.metrics && r.metrics.current && r.status !== 'fetch_failed') {\n    const m = r.metrics.current; const p = r.metrics.previous;\n    const fields = [\n      { type: 'mrkdwn', text: `*Model*\\n${esc(r.pricingModel.previous && r.pricingModel.previous !== r.pricingModel.current ? `${r.pricingModel.previous} → ${r.pricingModel.current}` : r.pricingModel.current)}` },\n      { type: 'mrkdwn', text: `*Tiers*\\n${p ? `${p.tierCount} → ${m.tierCount}` : m.tierCount}` },\n      { type: 'mrkdwn', text: `*Entry paid price*\\n${m.lowestPaidMonthly === null ? 'n/a' : `${r.currency} ${m.lowestPaidMonthly.toFixed(2)}`}/mo` },\n      { type: 'mrkdwn', text: `*Max price move*\\n${r.maxPriceChangePct === null || r.maxPriceChangePct === undefined ? '—' : `${r.maxPriceChangePct > 0 ? '+' : ''}${r.maxPriceChangePct.toFixed(1)}%`}` },\n    ];\n    blocks.push({ type: 'section', fields });\n  }\n  if (r.requiresReview) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: clip(`:warning: *Needs human review:* ${esc(r.reviewReasons.join(' '))}`, 3000) }] });\n  }\n  blocks.push({ type: 'divider' });\n}\nif (alerts.length > MAX_COMPETITORS) {\n  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `_${alerts.length - MAX_COMPETITORS} more competitor(s) omitted — see the n8n execution summary._` }] });\n}\nconst quiet = engine.results.filter((r) => !r.alertWorthy).map((r) => `${esc(r.competitorName)} (${r.status.replace('_', ' ')})`);\nblocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: clip(`${quiet.length ? `No action needed: ${quiet.join(', ')}  ·  ` : ''}${writeLine}`, 3000) }] });\n\nconst safeBlocks = blocks.slice(0, 50);\nconst fallback = clip(`[${cfg.modeLabel}] Competitor pricing: ${alerts.length} competitor(s) need attention in ${engine.isoWeek}. ${alerts.map((a) => `${a.competitorName} (${a.requiresReview && a.severity === 'none' ? 'needs review' : a.severity})`).join(', ')}`, 3000);\n\nlet skipReason = null;\nif (alerts.length === 0) skipReason = 'no_alert_worthy_changes';\nelse if (!cfg.sendSlackAlerts) skipReason = 'send_slack_alerts_disabled';\nelse if (cfg.dryRun) skipReason = 'dry_run';\nelse if (!cfg.secretsPresent.hasSlackWebhook) skipReason = 'missing_slack_webhook';\n\nreturn [{\n  json: {\n    allowSend: cfg.allowSlackSend === true && alerts.length > 0,\n    skipReason: cfg.allowSlackSend === true && alerts.length > 0 ? null : skipReason,\n    alertCount: alerts.length,\n    blockCount: safeBlocks.length,\n    payload: { text: fallback, blocks: safeBlocks, unfurl_links: false, unfurl_media: false },\n  },\n}];\n"
+      },
+      "id": "05e8c226-0ee4-4782-acc6-2c388897571f",
+      "name": "RevOps Slack Block Kit Builder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ee0d4970-da02-494d-a0ca-c20861d4417e",
+              "leftValue": "={{ $json.allowSend }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6e8eae15-3525-4457-a4fc-755099705458",
+      "name": "Gate: Slack Send Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3180,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_PRICING_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "6d628997-6a37-475c-a84e-cb7fd1ffe0c9",
+      "name": "Slack: Post RevOps Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3400,
+        -20
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Incoming webhook. Only when SEND_SLACK_ALERTS=true and DRY_RUN=false.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Slack Alert Skipped\n// Records why no Slack message was sent (gate closed or nothing alert-worthy).\n// ─────────────────────────────────────────────────────────────────────────────\nconst b = $input.first().json;\nreturn [{\n  json: {\n    slackStatus: 'skipped',\n    skipReason: b.skipReason || 'gate_closed',\n    alertCount: b.alertCount,\n    blockCount: b.blockCount,\n  },\n}];\n"
+      },
+      "id": "9f628c14-4e72-4c9b-a84b-0ef4413e0641",
+      "name": "Slack Alert Skipped",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3400,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Execution Summary & Audit\n// Produces a single, secret-free audit record of the run: effective safety\n// gates, per-competitor outcomes + fingerprints, CRM write outcome, Slack\n// outcome, warnings, and a deterministic checksum. Decides whether the ops\n// failure alert should fire (only if SEND_OPS_ALERTS gate is open).\n// ─────────────────────────────────────────────────────────────────────────────\nconst cfg = $('Config & Safety Gate').first().json;\nconst engine = $('Pricing Diff & Intelligence Engine').first().json;\nconst slackBuild = $('RevOps Slack Block Kit Builder').first().json;\n\nlet write = null;\ntry { write = $('Collect HubSpot Write Results').first().json; } catch (e) { /* not executed */ }\nif (!write) { try { write = $('Dry-Run Write Preview').first().json; } catch (e) { /* not executed */ } }\n\nconst last = $input.first().json || {};\nlet slack;\nif (last.slackStatus === 'skipped') slack = { status: 'skipped', reason: last.skipReason };\nelse if (last.error) slack = { status: 'failed', reason: String(typeof last.error === 'string' ? last.error : (last.error.message || 'request failed')).slice(0, 300) };\nelse slack = { status: String(last.data ?? '').trim() === 'ok' ? 'sent' : 'sent_unconfirmed', blocks: slackBuild.blockCount, alerts: slackBuild.alertCount };\n\nconst warnings = [...(cfg.warnings || [])];\nconst errors = [...(engine.errors || [])];\nfor (const r of engine.results) {\n  if (r.status === 'fetch_failed') errors.push({ competitorKey: r.competitorKey, stage: 'fetch', message: r.reviewReasons.join(' ') });\n  if (r.status === 'review_required') warnings.push(`${r.competitorName}: ${r.reviewReasons.join(' ')}`);\n}\nif (write && write.failures && write.failures.length) {\n  write.failures.forEach((f) => errors.push({ stage: 'hubspot_write', batchIndex: f.batchIndex, recordKeys: f.recordKeys, message: f.message }));\n}\nif (slack.status === 'failed') errors.push({ stage: 'slack', message: slack.reason });\n\nconst status = errors.length ? 'completed_with_errors' : warnings.length ? 'completed_with_warnings' : 'success';\nconst finishedAt = new Date();\nconst startedAt = new Date(cfg.runStartedAt);\n\nconst competitors = engine.results.map((r) => ({\n  competitorKey: r.competitorKey,\n  competitorName: r.competitorName,\n  status: r.status,\n  severity: r.severity,\n  alertWorthy: r.alertWorthy,\n  changeCount: (r.changes || []).length,\n  maxPriceChangePct: r.maxPriceChangePct ?? null,\n  snapshotKey: r.snapshotKey ?? null,\n  previousSnapshotKey: r.previousSnapshotKey ?? null,\n  fingerprint: r.fingerprint ? r.fingerprint.current : null,\n  snapshotValid: r.snapshotValid ?? null,\n}));\n\nconst fnv = (str) => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };\nconst checksum = fnv(JSON.stringify({ runId: cfg.runId, competitors, write: write && { mode: write.writeMode, n: write.recordsWritten } }));\n\nconst audit = {\n  runId: cfg.runId,\n  workflow: 'n8n-apify-hubspot-competitor-pricing-page-diff-tracker',\n  status,\n  mode: cfg.modeLabel,\n  isoWeek: cfg.isoWeek,\n  startedAt: cfg.runStartedAt,\n  finishedAt: finishedAt.toISOString(),\n  durationMs: Math.max(0, finishedAt - startedAt),\n  safety: {\n    sandboxRequested: cfg.sandboxRequested,\n    sandboxMode: cfg.sandboxMode,\n    dryRun: cfg.dryRun,\n    hubspotLoggingEnabled: cfg.hubspotLoggingEnabled,\n    sendSlackAlerts: cfg.sendSlackAlerts,\n    sendOpsAlerts: cfg.sendOpsAlerts,\n    gates: { allowHubspotWrite: cfg.allowHubspotWrite, allowSlackSend: cfg.allowSlackSend, allowOpsAlert: cfg.allowOpsAlert },\n    envAccessible: cfg.envAccessible,\n    secretsPresent: cfg.secretsPresent,\n  },\n  thresholds: engine.thresholds,\n  stats: engine.stats,\n  competitors,\n  hubspot: write ? {\n    mode: write.writeMode,\n    objectType: cfg.hubspotObjectType,\n    portalId: cfg.hubspotPortalId,\n    recordsWritten: write.recordsWritten || 0,\n    recordsPrepared: engine.stats.recordsPrepared,\n    blockedReason: write.blockedReason || null,\n    failures: (write.failures || []).length,\n  } : null,\n  slack,\n  warnings,\n  errors,\n  checksum: `fnv1a-${checksum}`,\n};\n\nconst needsOpsAlert = cfg.allowOpsAlert === true && (errors.length > 0 || competitors.some((c) => c.status === 'review_required'));\n\nreturn [{\n  json: {\n    ...audit,\n    needsOpsAlert,\n    opsAlertPayload: needsOpsAlert ? {\n      text: `[${cfg.modeLabel}] Competitor pricing tracker ${status} (${cfg.runId}): ${errors.length} error(s), ${warnings.length} warning(s).`,\n      runId: cfg.runId,\n      status,\n      errors: errors.slice(0, 20),\n      warnings: warnings.slice(0, 20),\n    } : null,\n  },\n}];\n"
+      },
+      "id": "d0ff5461-df22-4583-a29f-19105661e68b",
+      "name": "Execution Summary & Audit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3640,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fdd500bf-a090-4907-a713-604983e9a32e",
+              "leftValue": "={{ $json.needsOpsAlert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9d76eb48-0d06-4ca3-abc0-13077fa87f26",
+      "name": "Gate: Ops Alert Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3860,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.opsAlertPayload) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "71932d91-4d91-42af-a7b0-f88186962a09",
+      "name": "Ops: Post Failure Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4080,
+        20
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Only when SEND_OPS_ALERTS=true, DRY_RUN=false and errors/review items exist.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Weekly Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config & Safety Gate": {
+      "main": [
+        [
+          {
+            "node": "Route: Sandbox or Live?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Sandbox or Live?": {
+      "main": [
+        [
+          {
+            "node": "Load Sandbox Fixture",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Live Targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Sandbox Fixture": {
+      "main": [
+        [
+          {
+            "node": "Pricing Diff & Intelligence Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Live Targets": {
+      "main": [
+        [
+          {
+            "node": "Apify: Run Pricing Scraper Actor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify: Run Pricing Scraper Actor": {
+      "main": [
+        [
+          {
+            "node": "Attach Apify Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Apify Result": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Fetch Previous Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Fetch Previous Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Assemble Live Snapshot Pairs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Live Snapshot Pairs": {
+      "main": [
+        [
+          {
+            "node": "Pricing Diff & Intelligence Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pricing Diff & Intelligence Engine": {
+      "main": [
+        [
+          {
+            "node": "Build HubSpot Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HubSpot Batches": {
+      "main": [
+        [
+          {
+            "node": "Gate: Live CRM Write Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate: Live CRM Write Allowed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Batch Upsert Snapshots",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry-Run Write Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Batch Upsert Snapshots": {
+      "main": [
+        [
+          {
+            "node": "Collect HubSpot Write Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect HubSpot Write Results": {
+      "main": [
+        [
+          {
+            "node": "RevOps Slack Block Kit Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry-Run Write Preview": {
+      "main": [
+        [
+          {
+            "node": "RevOps Slack Block Kit Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RevOps Slack Block Kit Builder": {
+      "main": [
+        [
+          {
+            "node": "Gate: Slack Send Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate: Slack Send Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post RevOps Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack Alert Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post RevOps Alert": {
+      "main": [
+        [
+          {
+            "node": "Execution Summary & Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Alert Skipped": {
+      "main": [
+        [
+          {
+            "node": "Execution Summary & Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execution Summary & Audit": {
+      "main": [
+        [
+          {
+            "node": "Gate: Ops Alert Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate: Ops Alert Needed?": {
+      "main": [
+        [
+          {
+            "node": "Ops: Post Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

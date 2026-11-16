@@ -1,0 +1,36 @@
+# Secrets — never commit real environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Simulator output
+sim-output/
+
+# Node / tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+coverage/
+
+# n8n local data (credentials database, binary data, logs)
+.n8n/
+n8n-data/
+*.sqlite
+*.sqlite-journal
+
+# Exports that may contain live CRM or scrape data
+exports/
+*-live-export.json
+apify-datasets/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
